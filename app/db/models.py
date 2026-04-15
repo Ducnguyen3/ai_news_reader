@@ -156,6 +156,113 @@ class Article(Base):
     raw_page: Mapped[Optional["RawPage"]] = relationship(back_populates="article")
     article_categories: Mapped[List["ArticleCategory"]] = relationship(back_populates="article")
     article_authors: Mapped[List["ArticleAuthor"]] = relationship(back_populates="article")
+    ai_summaries: Mapped[List["ArticleAISummary"]] = relationship(back_populates="article")
+    ai_tags: Mapped[List["ArticleAITag"]] = relationship(back_populates="article")
+    embeddings: Mapped[List["ArticleEmbedding"]] = relationship(back_populates="article")
+    rag_chunks: Mapped[List["RAGChunk"]] = relationship(back_populates="article")
+
+
+class ArticleAISummary(Base):
+    __tablename__ = "article_ai_summaries"
+    __table_args__ = (
+        UniqueConstraint("article_id", "summary_type", name="uq_article_ai_summaries_article_type"),
+        Index("ix_article_ai_summaries_article_id", "article_id"),
+        Index("ix_article_ai_summaries_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"), nullable=False)
+    summary_text: Mapped[Optional[str]] = mapped_column(Text)
+    summary_type: Mapped[str] = mapped_column(String(50), nullable=False, default="brief", server_default="brief")
+    model_name: Mapped[Optional[str]] = mapped_column(String(100))
+    model_version: Mapped[Optional[str]] = mapped_column(String(50))
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="pending", server_default="pending")
+    error_message: Mapped[Optional[str]] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    article: Mapped["Article"] = relationship(back_populates="ai_summaries")
+
+
+class ArticleAITag(Base):
+    __tablename__ = "article_ai_tags"
+    __table_args__ = (
+        UniqueConstraint("article_id", "tag_type", "tag_name", name="uq_article_ai_tags_article_type_name"),
+        Index("ix_article_ai_tags_article_id", "article_id"),
+        Index("ix_article_ai_tags_tag_type", "tag_type"),
+        Index("ix_article_ai_tags_tag_name", "tag_name"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"), nullable=False)
+    tag_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    tag_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    confidence: Mapped[Optional[int]] = mapped_column(Integer)
+    is_primary: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    model_name: Mapped[Optional[str]] = mapped_column(String(100))
+    model_version: Mapped[Optional[str]] = mapped_column(String(50))
+    prompt_version: Mapped[Optional[str]] = mapped_column(String(50))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    article: Mapped["Article"] = relationship(back_populates="ai_tags")
+
+
+class ArticleEmbedding(Base):
+    __tablename__ = "article_embeddings"
+    __table_args__ = (
+        UniqueConstraint("article_id", "chunk_scope", name="uq_article_embeddings_article_scope"),
+        Index("ix_article_embeddings_article_id", "article_id"),
+        Index("ix_article_embeddings_chunk_scope", "chunk_scope"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"), nullable=False)
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(100))
+    embedding_vector: Mapped[str] = mapped_column(Text, nullable=False)
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    chunk_scope: Mapped[str] = mapped_column(String(50), nullable=False, default="title_summary", server_default="title_summary")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    article: Mapped["Article"] = relationship(back_populates="embeddings")
+
+
+class RAGChunk(Base):
+    __tablename__ = "rag_chunks"
+    __table_args__ = (
+        UniqueConstraint("article_id", "chunk_index", name="uq_rag_chunks_article_index"),
+        Index("ix_rag_chunks_article_id", "article_id"),
+        Index("ix_rag_chunks_chunk_index", "chunk_index"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    article_id: Mapped[int] = mapped_column(ForeignKey("articles.id"), nullable=False)
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    chunk_text: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    embedding_vector: Mapped[Optional[str]] = mapped_column(Text)
+    embedding_model: Mapped[Optional[str]] = mapped_column(String(100))
+    content_hash: Mapped[Optional[str]] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    article: Mapped["Article"] = relationship(back_populates="rag_chunks")
 
 
 class Category(Base):

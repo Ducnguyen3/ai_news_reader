@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db.models import CrawlJob, RawPage, Source
-from app.parsers.common import ParsedArticle
-from app.services.article_service import ArticleService
+from app.ingestion.parsers.common import ParsedArticle
+from app.repositories.article_repository import ArticleRepository
+from app.repositories.raw_page_repository import RawPageRepository
 from app.utils.helpers import normalize_whitespace, sha256_text
 from app.utils.logger import get_logger
 
@@ -34,7 +35,8 @@ class BaseCrawler(ABC):
     def __init__(self, session: Session) -> None:
         self.session = session
         self.settings = get_settings()
-        self.article_service = ArticleService(session)
+        self.article_repository = ArticleRepository(session)
+        self.raw_page_repository = RawPageRepository(session)
         self.logger = get_logger(self.__class__.__name__)
         self.client = httpx.Client(
             timeout=self.settings.crawl_timeout_seconds,
@@ -129,7 +131,7 @@ class BaseCrawler(ABC):
         canonical_url: str | None,
     ) -> RawPage:
         text_content = normalize_whitespace(BeautifulSoup(html_content or "", "lxml").get_text(" "))
-        return self.article_service.save_raw_page(
+        return self.raw_page_repository.create_raw_page(
             source_id=source.id,
             crawl_job_id=crawl_job.id,
             url=url,
@@ -150,14 +152,30 @@ class BaseCrawler(ABC):
         raw_page: RawPage,
         parsed_article: ParsedArticle,
     ):
-        return self.article_service.save_article(
+        canonical_url = parsed_article.canonical_url or parsed_article.article_url
+        url_hash = sha256_text(canonical_url.strip().lower())
+        content_hash = sha256_text(
+            f"{normalize_whitespace(parsed_article.title)}|{normalize_whitespace(parsed_article.content_text)}".lower()
+        )
+
+        if self.article_repository.get_article_by_url_hash(url_hash) is not None:
+            return None
+        if self.article_repository.get_article_by_content_hash(content_hash) is not None:
+            return None
+
+        article = self.article_repository.create_article(
             source=source,
             raw_page=raw_page,
             parsed_article=parsed_article,
+            url_hash=url_hash,
+            content_hash=content_hash,
         )
+        self.article_repository.attach_categories(article, source.id, parsed_article.category_names)
+        self.article_repository.attach_authors(article, parsed_article.author_names)
+        return article
 
     def ensure_source(self) -> Source:
-        return self.article_service.get_or_create_source(self.source_name, self.domain)
+        return self.article_repository.get_or_create_source(self.source_name, self.domain)
 
     def close(self) -> None:
         self.client.close()
@@ -190,3 +208,6 @@ class BaseCrawler(ABC):
         if last_error is not None:
             raise last_error
         raise RuntimeError(f"Could not fetch url: {url}")
+
+
+__all__ = ["BaseCrawler", "FetchResult"]

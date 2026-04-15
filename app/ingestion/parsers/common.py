@@ -10,6 +10,8 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from dateutil import parser as date_parser
 
+from app.ingestion.contracts import ParsedArticlePayload
+
 
 @dataclass
 class ParsedArticle:
@@ -114,6 +116,56 @@ def extract_breadcrumb_names(soup: BeautifulSoup) -> List[str]:
             item = element.get("item", {})
             if isinstance(item, dict):
                 name = clean_text(item.get("name"))
-                if name and name.lower() != "trang chủ" and name not in names:
+                if name and name.lower() != "trang chá»§" and name not in names:
                     names.append(name)
     return names
+
+
+def to_parsed_article_payload(article: ParsedArticle) -> ParsedArticlePayload:
+    return ParsedArticlePayload(
+        source_name=article.source_name,
+        article_url=article.article_url,
+        canonical_url=article.canonical_url,
+        title=article.title,
+        summary=article.summary,
+        content_text=article.content_text,
+        publish_time=article.publish_time,
+        updated_time=article.updated_time,
+        author_names=list(article.author_names),
+        category_names=list(article.category_names),
+        main_image_url=article.main_image_url,
+        tags=list(article.tags),
+        language=article.language,
+    )
+
+
+def to_parsed_article(article: ParsedArticlePayload) -> ParsedArticle:
+    return ParsedArticle(
+        source_name=article.source_name,
+        article_url=article.article_url,
+        canonical_url=article.canonical_url,
+        title=article.title,
+        summary=article.summary,
+        content_text=article.content_text,
+        publish_time=article.publish_time,
+        updated_time=article.updated_time,
+        author_names=list(article.author_names),
+        category_names=list(article.category_names),
+        main_image_url=article.main_image_url,
+        tags=list(article.tags),
+        language=article.language,
+    )
+
+
+__all__ = [
+    "ParsedArticle",
+    "clean_text",
+    "clean_text_list",
+    "extract_breadcrumb_names",
+    "find_news_article_json_ld",
+    "get_meta_content",
+    "join_url",
+    "parse_datetime",
+    "to_parsed_article_payload",
+    "to_parsed_article",
+]

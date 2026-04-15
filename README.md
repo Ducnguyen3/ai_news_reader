@@ -24,26 +24,48 @@ He thong duoc thiet ke theo huong production-friendly:
 |   |-- __init__.py
 |   |-- main.py
 |   |-- config.py
-|   |-- crawlers
+|   |-- ai
 |   |   |-- __init__.py
-|   |   |-- base_crawler.py
-|   |   |-- vnexpress_crawler.py
-|   |   |-- cafef_crawler.py
-|   |   |-- genk_crawler.py
-|   |   `-- diendandoanhnghiep_crawler.py
+|   |   |-- service.py
+|   |   |-- summarizer.py
+|   |   `-- types.py
+|   |-- analytics
+|   |   |-- __init__.py
+|   |   |-- repository.py
+|   |   `-- service.py
 |   |-- db
 |   |   |-- __init__.py
 |   |   |-- base.py
 |   |   |-- session.py
 |   |   `-- models.py
-|   |-- parsers
+|   |-- ingestion
 |   |   |-- __init__.py
-|   |   `-- common.py
+|   |   |-- contracts.py
+|   |   |-- service.py
+|   |   |-- crawlers
+|   |   |   |-- __init__.py
+|   |   |   |-- base_crawler.py
+|   |   |   |-- vnexpress_crawler.py
+|   |   |   |-- cafef_crawler.py
+|   |   |   |-- genk_crawler.py
+|   |   |   `-- diendandoanhnghiep_crawler.py
+|   |   |-- dedup
+|   |   |   |-- __init__.py
+|   |   |   `-- service.py
+|   |   `-- parsers
+|   |       |-- __init__.py
+|   |       `-- common.py
+|   |-- repositories
+|   |   |-- __init__.py
+|   |   |-- article_repository.py
+|   |   |-- crawl_job_repository.py
+|   |   `-- raw_page_repository.py
+|   |-- scheduler
+|   |   |-- __init__.py
+|   |   `-- service.py
 |   |-- services
 |   |   |-- __init__.py
-|   |   |-- crawl_service.py
-|   |   |-- article_service.py
-|   |   `-- dedup_service.py
+|   |   `-- crawl_service.py
 |   `-- utils
 |       |-- __init__.py
 |       |-- logger.py
@@ -64,13 +86,13 @@ He thong duoc thiet ke theo huong production-friendly:
 
 ## 2. Kien truc chinh
 
-- `BaseCrawler`: xu ly HTTP client, retry, delay, normalize links, category pages, pagination.
-- Moi site co crawler rieng: selector, regex article URL, category list, rule pagination rieng.
-- `CrawlService`: dieu phoi crawl, tao `crawl_jobs`, cap nhat `crawl_daily_summaries`.
-- `ArticleService`: luu `raw_pages`, `articles`, `authors`, `categories`.
-- `DedupService`: chong trung theo `url_hash` va `content_hash`.
+- `app/ingestion/crawlers/*`: implementation crawler theo tung site, xu ly HTTP client, retry, delay, normalize links, category pages, pagination.
+- `app/ingestion/parsers/common.py`: parser/helper dung chung cho crawler.
+- `IngestionService`: fetch + extract links + parse + dedup selection truoc khi persist.
+- `CrawlService`: orchestration runtime, tao `crawl_jobs`, persist qua repository layer, cap nhat `crawl_daily_summaries`.
+- `app/repositories/*`: data access layer cho `sources`, `raw_pages`, `articles`, `crawl_jobs`.
+- `SchedulerService`: chay ingestion theo lich APScheduler.
 - `Alembic`: quan ly schema migration.
-- `APScheduler`: chay crawl hang ngay luc 07:00.
 
 ## 3. Database tables
 
@@ -106,13 +128,14 @@ Moi source hien tai:
 - loc link bai viet bang regex rieng
 - dedup link bang `url_hash`
 
-Pipeline van giu nguyen:
+Pipeline hien tai:
 
 1. `fetch`
 2. `extract links`
 3. `parse article`
-4. `save raw page`
-5. `save article`
+4. `dedup selection`
+5. `persist raw page`
+6. `persist article`
 
 ## 5. Yeu cau moi truong
 
@@ -157,23 +180,73 @@ Neu chay bang Docker, doi `DATABASE_URL` thanh:
 DATABASE_URL=postgresql+psycopg://postgres:1307@postgres:5432/news_crawler
 ```
 
-## 7. Chay local bang virtualenv
+## 7. Chay thu nhanh
 
-### 7.1. Tao virtualenv
+Neu ban muon kiem tra he thong co chay duoc hay khong, day la luong toi thieu de test local:
+
+### 7.1. Chuan bi moi truong
+
+```cmd
+python -m venv .venv
+.venv\Scripts\activate
+pip install --upgrade pip
+pip install -r requirements.txt
+copy .env.example .env
+```
+
+### 7.2. Tao database va schema
+
+Tao database `news_crawler` trong PostgreSQL, sau do chay:
+
+```cmd
+alembic upgrade head
+```
+
+### 7.3. Chay test parser
+
+```cmd
+python -m pytest
+```
+
+### 7.4. Crawl thu 1 nguon
+
+```cmd
+python -m app.main crawl_source --source vnexpress
+```
+
+Neu thanh cong, log se hien thi tong so bai tim thay, so bai insert duoc va so bai loi.
+
+### 7.5. Crawl tat ca nguon
+
+```cmd
+python -m app.main crawl_all
+```
+
+### 7.6. Chay scheduler
+
+```cmd
+python -m app.main run_scheduler
+```
+
+Mac dinh scheduler chay luc `07:00` moi ngay theo `APP_TIMEZONE`.
+
+## 8. Chay local bang virtualenv
+
+### 8.1. Tao virtualenv
 
 ```cmd
 python -m venv .venv
 .venv\Scripts\activate
 ```
 
-### 7.2. Cai dependencies
+### 8.2. Cai dependencies
 
 ```cmd
 pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### 7.3. Tao database `news_crawler`
+### 8.3. Tao database `news_crawler`
 
 Loi ban gap truoc do la:
 
@@ -198,27 +271,26 @@ CREATE DATABASE news_crawler;
 
 Neu khong co `psql` trong PATH, ban co the tao DB bang pgAdmin.
 
-### 7.4. Chay migration
+### 8.4. Chay migration
 
 ```cmd
 alembic upgrade head
 ```
 
-### 7.5. Chay test
+### 8.5. Chay test
 
 ```cmd
 python -m pytest
 ```
 
-### 7.6. Crawl thu 1 source
+### 8.6. Crawl thu 1 source
 
 ```cmd
 python -m app.main crawl_source --source vnexpress
-```
-python -m app.main crawl_source --source genk
 python -m app.main crawl_source --source cafef
+python -m app.main crawl_source --source genk
 python -m app.main crawl_source --source diendandoanhnghiep
-
+```
 
 Ban co the thay `vnexpress` bang:
 
@@ -226,13 +298,13 @@ Ban co the thay `vnexpress` bang:
 - `genk`
 - `diendandoanhnghiep`
 
-### 7.7. Crawl tat ca source
+### 8.7. Crawl tat ca source
 
 ```cmd
 python -m app.main crawl_all
 ```
 
-### 7.8. Chay scheduler hang ngay
+### 8.8. Chay scheduler hang ngay
 
 ```cmd
 python -m app.main run_scheduler
@@ -240,9 +312,9 @@ python -m app.main run_scheduler
 
 Mac dinh scheduler chay luc `07:00` moi ngay theo `APP_TIMEZONE`.
 
-## 8. Chay bang Docker
+## 9. Chay bang Docker
 
-### 8.1. Tao `.env`
+### 9.1. Tao `.env`
 
 ```cmd
 copy .env.example .env
@@ -255,38 +327,38 @@ POSTGRES_PASSWORD=1307
 DATABASE_URL=postgresql+psycopg://postgres:1307@postgres:5432/news_crawler
 ```
 
-### 8.2. Khoi dong PostgreSQL
+### 9.2. Khoi dong PostgreSQL
 
 ```cmd
 docker compose up -d postgres
 ```
 
-### 8.3. Tao schema
+### 9.3. Tao schema
 
 ```cmd
 docker compose run --rm app alembic upgrade head
 ```
 
-### 8.4. Crawl thu trong container
+### 9.4. Crawl thu trong container
 
 ```cmd
 docker compose run --rm app python -m app.main crawl_source --source vnexpress
 ```
 
-### 8.5. Crawl tat ca trong container
+### 9.5. Crawl tat ca trong container
 
 ```cmd
 docker compose run --rm app python -m app.main crawl_all
 ```
 
-### 8.6. Chay scheduler trong container
+### 9.6. Chay scheduler trong container
 
 ```cmd
 docker compose up -d --build app
 docker compose logs -f app
 ```
 
-### 8.7. Dung container
+### 9.7. Dung container
 
 ```cmd
 docker compose down
@@ -298,7 +370,7 @@ Neu muon xoa ca volume database:
 docker compose down -v
 ```
 
-## 9. Thu tu chay de project hoat dong
+## 10. Thu tu chay de project hoat dong
 
 ### Cach 1: Local
 
@@ -353,7 +425,7 @@ docker compose up -d --build app
 docker compose logs -f app
 ```
 
-## 10. Cac lenh CLI
+## 11. Cac lenh CLI
 
 ### Crawl tat ca source
 
@@ -373,7 +445,7 @@ python -m app.main crawl_source --source vnexpress
 python -m app.main run_scheduler
 ```
 
-## 11. Config crawler quan trong
+## 12. Config crawler quan trong
 
 Ban co the dieu chinh trong `.env`:
 
@@ -386,7 +458,7 @@ Ban co the dieu chinh trong `.env`:
 - `CRAWL_TIMEOUT_SECONDS=20`
   - timeout cho moi request
 
-## 12. Lich su crawl theo ngay nam o dau
+## 13. Lich su crawl theo ngay nam o dau
 
 Phan luu lich su crawl theo ngay hien tai nam o:
 
@@ -397,7 +469,7 @@ Phan luu lich su crawl theo ngay hien tai nam o:
   - `_finish_daily_summary(...)`
 - `migrations/versions/20260410_0002_add_crawl_daily_summaries.py`
 
-## 13. Mo rong sau nay
+## 14. Mo rong sau nay
 
 - them sitemap crawling cho tung site
 - them stop condition khi page pagination khong con bai moi

@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock
 
-from app.crawlers.vnexpress_crawler import VnExpressCrawler
+from app.ingestion.crawlers.vnexpress_crawler import VnExpressCrawler
 
 
 def test_vnexpress_parse_article_extracts_standard_fields() -> None:

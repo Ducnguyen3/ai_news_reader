@@ -4,8 +4,8 @@ import re
 
 from bs4 import BeautifulSoup
 
-from app.crawlers.base_crawler import BaseCrawler, FetchResult
-from app.parsers.common import (
+from app.ingestion.crawlers.base_crawler import BaseCrawler, FetchResult
+from app.ingestion.parsers.common import (
     ParsedArticle,
     clean_text,
     clean_text_list,
@@ -103,3 +103,6 @@ class VnExpressCrawler(BaseCrawler):
             tags=[],
             updated_time=updated_time,
         )
+
+
+__all__ = ["VnExpressCrawler"]

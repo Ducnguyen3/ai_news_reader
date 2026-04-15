@@ -1,19 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, Type
+from typing import Iterable
 
+from bs4 import BeautifulSoup
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.crawlers.base_crawler import BaseCrawler
-from app.crawlers.cafef_crawler import CafeFCrawler
-from app.crawlers.diendandoanhnghiep_crawler import DienDanDoanhNghiepCrawler
-from app.crawlers.genk_crawler import GenkCrawler
-from app.crawlers.vnexpress_crawler import VnExpressCrawler
-from app.db.models import CrawlDailySummary, CrawlJob
-from app.services.dedup_service import DedupService
-from app.utils.helpers import now_local
+from app.config import get_settings
+from app.db.models import CrawlDailySummary, Source
+from app.ingestion.parsers.common import to_parsed_article
+from app.ingestion.service import IngestionResult, IngestionService
+from app.repositories.article_repository import ArticleRepository
+from app.repositories.crawl_job_repository import CrawlJobRepository
+from app.repositories.raw_page_repository import RawPageRepository
+from app.utils.helpers import normalize_whitespace, now_local, sha256_text
 from app.utils.logger import get_logger
 
 
@@ -23,20 +24,18 @@ class CrawlSummary:
     total_found: int
     total_inserted: int
     total_failed: int
+    article_ids: list[int]
 
 
 class CrawlService:
-    crawler_registry: Dict[str, Type[BaseCrawler]] = {
-        "vnexpress": VnExpressCrawler,
-        "cafef": CafeFCrawler,
-        "genk": GenkCrawler,
-        "diendandoanhnghiep": DienDanDoanhNghiepCrawler,
-    }
-
     def __init__(self, session: Session) -> None:
         self.session = session
+        self.settings = get_settings()
         self.logger = get_logger(self.__class__.__name__)
-        self.dedup_service = DedupService(session)
+        self.ingestion_service = IngestionService(session)
+        self.article_repository = ArticleRepository(session)
+        self.raw_page_repository = RawPageRepository(session)
+        self.crawl_job_repository = CrawlJobRepository(session)
 
     def crawl_all(self, source_names: Iterable[str]) -> list[CrawlSummary]:
         summaries: list[CrawlSummary] = []
@@ -45,16 +44,18 @@ class CrawlService:
         return summaries
 
     def crawl_source(self, source_name: str) -> CrawlSummary:
-        crawler_cls = self.crawler_registry.get(source_name.lower())
+        normalized_source = source_name.strip().lower()
+        crawler_cls = IngestionService.crawler_registry.get(normalized_source)
         if crawler_cls is None:
             raise ValueError(f"Unsupported source: {source_name}")
 
-        crawler = crawler_cls(self.session)
-        source = crawler.ensure_source()
+        source = self.article_repository.get_or_create_source(crawler_cls.source_name, crawler_cls.domain)
         started_at = now_local()
-        crawl_job = CrawlJob(source_id=source.id, status="running", started_at=started_at)
-        self.session.add(crawl_job)
-        self.session.flush()
+        crawl_job = self.crawl_job_repository.create_job(
+            source_id=source.id,
+            status="running",
+            started_at=started_at,
+        )
         daily_summary = self._start_daily_summary(
             source_id=source.id,
             crawl_job_id=crawl_job.id,
@@ -66,56 +67,35 @@ class CrawlService:
         total_failed = 0
 
         try:
-            homepage = crawler.fetch_homepage()
-            category_pages = crawler.fetch_category_pages()
-            page_html_list = [homepage.html, *(page.html for page in category_pages)]
-            article_links = crawler.extract_article_links_from_multiple_pages(page_html_list)
-            total_found = len(article_links)
-            new_article_links = self.dedup_service.filter_new_urls(article_links)
-            skipped_existing = total_found - len(new_article_links)
+            ingestion_result = self.ingestion_service.ingest_source(normalized_source)
+            total_found = ingestion_result.total_found
+            total_inserted, persistence_failed, article_ids = self._persist_ingestion_result(
+                source=source,
+                crawl_job_id=crawl_job.id,
+                ingestion_result=ingestion_result,
+            )
+            total_failed = ingestion_result.total_failed + persistence_failed
+
             self.logger.info(
-                "[%s] found=%s new=%s skipped_existing=%s",
-                source_name,
-                total_found,
-                len(new_article_links),
-                skipped_existing,
+                "[%s] found=%s selected=%s duplicates=%s inserted=%s failed=%s",
+                normalized_source,
+                ingestion_result.total_found,
+                ingestion_result.total_selected,
+                ingestion_result.total_duplicates,
+                total_inserted,
+                total_failed,
             )
 
-            for url in new_article_links:
-                try:
-                    article_response = crawler.fetch_article(url)
-                    parsed_article = crawler.parse_article(article_response.html, url)
-                    if not parsed_article.title or not parsed_article.content_text:
-                        self.logger.warning("[%s] skipped invalid article %s", source_name, url)
-                        total_failed += 1
-                        continue
-
-                    raw_page = crawler.save_raw_page(
-                        source=source,
-                        crawl_job=crawl_job,
-                        url=url,
-                        page_type="article",
-                        http_status=article_response.status_code,
-                        html_content=article_response.html,
-                        canonical_url=parsed_article.canonical_url,
-                    )
-                    article = crawler.save_article(
-                        source=source,
-                        raw_page=raw_page,
-                        parsed_article=parsed_article,
-                    )
-                    if article is not None:
-                        total_inserted += 1
-                except Exception as exc:
-                    total_failed += 1
-                    self.logger.exception("[%s] failed processing article %s: %s", source_name, url, exc)
-
             finished_at = now_local()
-            crawl_job.status = "success"
-            crawl_job.total_found = total_found
-            crawl_job.total_inserted = total_inserted
-            crawl_job.total_failed = total_failed
-            crawl_job.finished_at = finished_at
+            self.crawl_job_repository.update_job_status(
+                crawl_job=crawl_job,
+                status="success",
+                total_found=total_found,
+                total_inserted=total_inserted,
+                total_failed=total_failed,
+                finished_at=finished_at,
+                error_message=None,
+            )
             self._finish_daily_summary(
                 daily_summary=daily_summary,
                 crawl_job_id=crawl_job.id,
@@ -126,17 +106,19 @@ class CrawlService:
                 total_failed=total_failed,
                 error_message=None,
             )
-            self.session.flush()
-            self.logger.info("[%s] inserted=%s failed=%s", source_name, total_inserted, total_failed)
-            return CrawlSummary(source_name, total_found, total_inserted, total_failed)
+            self.logger.info("[%s] inserted=%s failed=%s", normalized_source, total_inserted, total_failed)
+            return CrawlSummary(normalized_source, total_found, total_inserted, total_failed, article_ids)
         except Exception as exc:
             finished_at = now_local()
-            crawl_job.status = "failed"
-            crawl_job.total_found = total_found
-            crawl_job.total_inserted = total_inserted
-            crawl_job.total_failed = total_failed + 1
-            crawl_job.error_message = str(exc)
-            crawl_job.finished_at = finished_at
+            self.crawl_job_repository.update_job_status(
+                crawl_job=crawl_job,
+                status="failed",
+                total_found=total_found,
+                total_inserted=total_inserted,
+                total_failed=total_failed + 1,
+                finished_at=finished_at,
+                error_message=str(exc),
+            )
             self._finish_daily_summary(
                 daily_summary=daily_summary,
                 crawl_job_id=crawl_job.id,
@@ -147,11 +129,71 @@ class CrawlService:
                 total_failed=total_failed + 1,
                 error_message=str(exc),
             )
-            self.session.flush()
-            self.logger.exception("[%s] crawl job failed: %s", source_name, exc)
+            self.logger.exception("[%s] crawl job failed: %s", normalized_source, exc)
             raise
-        finally:
-            crawler.close()
+
+    def _persist_ingestion_result(
+        self,
+        *,
+        source: Source,
+        crawl_job_id: int,
+        ingestion_result: IngestionResult,
+    ) -> tuple[int, int, list[int]]:
+        total_inserted = 0
+        total_failed = 0
+        article_ids: list[int] = []
+
+        for record in ingestion_result.records:
+            try:
+                raw_page = self.raw_page_repository.create_raw_page(
+                    source_id=source.id,
+                    crawl_job_id=crawl_job_id,
+                    url=record.raw_page.url,
+                    url_hash=sha256_text(record.raw_page.url.strip().lower()),
+                    page_type=record.raw_page.page_type,
+                    http_status=record.raw_page.http_status,
+                    html_content=record.raw_page.html_content,
+                    text_content=normalize_whitespace(
+                        BeautifulSoup(record.raw_page.html_content or "", "lxml").get_text(" ")
+                    ),
+                    canonical_url=record.raw_page.canonical_url,
+                    checksum=sha256_text(record.raw_page.html_content or ""),
+                    parser_version=self.settings.parser_version,
+                )
+
+                parsed_article = to_parsed_article(record.parsed_article)
+                canonical_url = parsed_article.canonical_url or parsed_article.article_url
+                url_hash = sha256_text(canonical_url.strip().lower())
+                content_hash = sha256_text(
+                    f"{normalize_whitespace(parsed_article.title)}|{normalize_whitespace(parsed_article.content_text)}".lower()
+                )
+
+                if self.article_repository.get_article_by_url_hash(url_hash) is not None:
+                    continue
+                if self.article_repository.get_article_by_content_hash(content_hash) is not None:
+                    continue
+
+                article = self.article_repository.create_article(
+                    source=source,
+                    raw_page=raw_page,
+                    parsed_article=parsed_article,
+                    url_hash=url_hash,
+                    content_hash=content_hash,
+                )
+                self.article_repository.attach_categories(article, source.id, parsed_article.category_names)
+                self.article_repository.attach_authors(article, parsed_article.author_names)
+                total_inserted += 1
+                article_ids.append(article.id)
+            except Exception as exc:
+                total_failed += 1
+                self.logger.exception(
+                    "[%s] failed persisting article %s: %s",
+                    ingestion_result.source_name,
+                    record.parsed_article.article_url,
+                    exc,
+                )
+
+        return total_inserted, total_failed, article_ids
 
     def _start_daily_summary(
         self,
